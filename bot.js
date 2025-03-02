@@ -1,6 +1,13 @@
 const { Client, GatewayIntentBits, ActivityType, ApplicationCommandOptionType } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
+const sqlite3 = require('sqlite3').verbose();
+const db = new sqlite3.Database('database.db');
+
+db.serialize(() => {
+    db.run(`CREATE TABLE IF NOT EXISTS previous_roles (user_id TEXT PRIMARY KEY, roles TEXT)`);
+});
+
 const client = new Client({ 
     intents: [
         GatewayIntentBits.Guilds, 
@@ -557,11 +564,61 @@ class Bridge {
     }
 }
 
+class NoRoleBypass {
+    constructor(client) {
+        this.client = client;
+        this.client.on('guildMemberAdd', member => this.handleGuildMemberAdd(member));
+        this.client.on('guildMemberRemove', member => this.handleGuildMemberRemove(member));
+    }
+
+    async handleGuildMemberAdd(member) {
+        const previousRoles = this.getPreviousRoles(member.id);
+        if (!previousRoles) return;
+
+        try {
+            await member.roles.add(previousRoles);
+            this.removePreviousRoles(member.id);
+        } catch (error) {
+            log(`Failed to add roles to ${member.user.tag}: ${error}`, 'NO-ROLE-BYPASS');
+        }
+    }
+
+    handleGuildMemberRemove(member) {
+        this.storePreviousRoles(member.id, member.roles.cache);
+    }
+
+    storePreviousRoles(userId, roles) {
+        db.serialize(() => {
+            db.run(`INSERT INTO previous_roles (user_id, roles) VALUES (?, ?)`, [userId, JSON.stringify(Array.from(roles.keys()))]);
+        });
+    }
+
+    getPreviousRoles(userId) {
+        return db.get(`SELECT roles FROM previous_roles WHERE user_id = ?`, [userId], (error, row) => {
+            if (error) {
+                log(`Failed to get previous roles for ${userId}: ${error}`, 'NO-ROLE-BYPASS');
+                return null;
+            }
+            return row ? JSON.parse(row.roles) : null;
+        });
+    }
+
+    removePreviousRoles(userId) {
+        db.run(`DELETE FROM previous_roles WHERE user_id = ?`, [userId], error => {
+            if (error) {
+                log(`Failed to remove previous roles for ${userId}: ${error}`, 'NO-ROLE-BYPASS');
+            }
+        });
+    }
+}
+
 client.once('ready', () => {
     log(`Setting up bridges...`, 'CLIENT');
     new Bridge(client);
+    log(`Setting up "no-role bypass"...`, 'CLIENT');
+    new NoRoleBypass(client);
     log(`${client.user.tag} is ready!`, 'CLIENT');
-    client.user.setActivity('🌉 i sleep under bridges', { type: ActivityType.Custom });
+    client.user.setActivity('🚽 skibidi', { type: ActivityType.Custom });
 });
 
 client.login(
