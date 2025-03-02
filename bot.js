@@ -1,3 +1,4 @@
+const { Events } = require('discord.js');
 const { Client, GatewayIntentBits, ActivityType, ApplicationCommandOptionType } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
@@ -13,7 +14,8 @@ const client = new Client({
         GatewayIntentBits.Guilds, 
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.GuildWebhooks,
-        GatewayIntentBits.MessageContent
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMembers
     ] 
 });
 require('dotenv').config();
@@ -567,41 +569,51 @@ class Bridge {
 class NoRoleBypass {
     constructor(client) {
         this.client = client;
-        this.client.on('guildMemberAdd', member => this.handleGuildMemberAdd(member));
-        this.client.on('guildMemberRemove', member => this.handleGuildMemberRemove(member));
+        this.client.on(Events.GuildMemberAdd, async (member) => await this.handleGuildMemberAdd(member));
+        this.client.on(Events.GuildMemberRemove, async (member) => await this.handleGuildMemberRemove(member));
     }
 
     async handleGuildMemberAdd(member) {
-        const previousRoles = this.getPreviousRoles(member.id);
+        const previousRoles = await this.getPreviousRoles(member.id);
         if (!previousRoles) return;
 
         try {
-            await member.roles.add(previousRoles);
+            log(`Restoring roles for ${member.user.tag}`, 'NO-ROLE-BYPASS');
+            previousRoles.forEach(async (roleId) => {
+                const role = member.guild.roles.cache.get(roleId);
+                if (role) {
+                    await member.roles.add(role, "Role restore").catch(e=>{});
+                }
+            });
             this.removePreviousRoles(member.id);
         } catch (error) {
             log(`Failed to add roles to ${member.user.tag}: ${error}`, 'NO-ROLE-BYPASS');
         }
     }
 
-    handleGuildMemberRemove(member) {
+    async handleGuildMemberRemove(member) {
+        if (member.user.bot) return;
+        log(`Storing roles for ${member.user.tag}`, 'NO-ROLE-BYPASS');
         this.storePreviousRoles(member.id, member.roles.cache);
     }
 
     storePreviousRoles(userId, roles) {
         db.serialize(() => {
-            db.run(`INSERT INTO previous_roles (user_id, roles) VALUES (?, ?)`, [userId, JSON.stringify(Array.from(roles.keys()))]);
+            db.run(`INSERT OR REPLACE INTO previous_roles (user_id, roles) VALUES (?, ?)`, [userId, JSON.stringify(Array.from(roles.keys()))]);
         });
     }
 
-    getPreviousRoles(userId) {
-        return db.get(`SELECT roles FROM previous_roles WHERE user_id = ?`, [userId], (error, row) => {
-            if (error) {
-                log(`Failed to get previous roles for ${userId}: ${error}`, 'NO-ROLE-BYPASS');
-                return null;
-            }
-            return row ? JSON.parse(row.roles) : null;
+    async getPreviousRoles(userId) {
+        return new Promise((resolve, reject) => {
+            db.get(`SELECT roles FROM previous_roles WHERE user_id = ?`, [userId], (error, row) => {
+                if (error) {
+                    log(`Failed to get previous roles for ${userId}: ${error}`, 'NO-ROLE-BYPASS');
+                    return reject(error);
+                }
+                resolve(row ? JSON.parse(row.roles) : null);
+            });
         });
-    }
+    }    
 
     removePreviousRoles(userId) {
         db.run(`DELETE FROM previous_roles WHERE user_id = ?`, [userId], error => {
